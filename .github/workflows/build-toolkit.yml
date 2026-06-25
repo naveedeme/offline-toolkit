@@ -1,0 +1,264 @@
+# =============================================================================
+#  .github/workflows/build-toolkit.yml
+#
+#  Builds the offline toolkit on Ubuntu 22.04 LTS and Ubuntu 26.04 LTS in
+#  parallel, publishing both tarballs to a single GitHub Release.
+#
+#  Runners:
+#    - ubuntu-22.04  (Jammy Jellyfish)  — GA
+#    - ubuntu-26.04  (Resolute Raccoon) — Public preview
+#
+#  Triggers:
+#    - Push to main that touches config.sh   (auto-release)
+#    - Weekly on Sunday at 02:00 UTC         (keep packages fresh)
+#    - Manual via workflow_dispatch          (on-demand with options)
+#
+#  Release assets (single release, two tarballs):
+#    offline-toolkit-ubuntu22-v2026-06-24-0200.tar.gz
+#    offline-toolkit-ubuntu26-v2026-06-24-0200.tar.gz
+# =============================================================================
+
+name: Build Offline Toolkit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "config.sh"               # rebuild only when packages change
+
+  schedule:
+    - cron: "0 2 * * 0"          # every Sunday at 02:00 UTC
+
+  workflow_dispatch:
+    inputs:
+      version_label:
+        description: "Custom version label (e.g. v2026-06-24-hotfix)"
+        required: false
+        default: ""
+      skip_sections:
+        description: "Sections to skip (comma-separated: apt,pip,npm,snap,binaries)"
+        required: false
+        default: ""
+      ubuntu_filter:
+        description: "Build only one version (22 or 26 — leave empty for both)"
+        required: false
+        default: ""
+
+jobs:
+
+  # ── Job 1: Compute the shared version tag ──────────────────────────────────
+  # Runs once so both matrix jobs share an identical tag string.
+  prepare:
+    name: Prepare version tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - name: Set version tag
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version_label }}" ]; then
+            TAG="${{ github.event.inputs.version_label }}"
+          else
+            TAG="v$(date -u +%Y-%m-%d)-$(date -u +%H%M)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version tag: $TAG"
+
+  # ── Job 2: Matrix build — runs in parallel on both LTS runners ─────────────
+  build:
+    name: Build — Ubuntu ${{ matrix.ubuntu_name }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+
+    permissions:
+      contents: write
+
+    strategy:
+      fail-fast: false            # one failure won't cancel the other version
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            ubuntu_version: "22"
+            ubuntu_name: "22.04 LTS Jammy Jellyfish"
+            ubuntu_short: "ubuntu22"
+
+          - runner: ubuntu-26.04
+            ubuntu_version: "26"
+            ubuntu_name: "26.04 LTS Resolute Raccoon"
+            ubuntu_short: "ubuntu26"
+
+    steps:
+      # ── Filter: honour the ubuntu_filter dispatch input ──────────────────────
+      - name: Check ubuntu filter
+        id: filter
+        run: |
+          FILTER="${{ github.event.inputs.ubuntu_filter }}"
+          VERSION="${{ matrix.ubuntu_version }}"
+          if [ -n "$FILTER" ] && [[ "$FILTER" != *"$VERSION"* ]]; then
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
+            echo "Skipping Ubuntu $VERSION — not in filter '$FILTER'"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Building Ubuntu $VERSION"
+          fi
+
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/checkout@v4
+
+      # ── 2. Install prerequisites ─────────────────────────────────────────────
+      - name: Install prerequisites
+        if: steps.filter.outputs.skip != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            apt-rdepends \
+            dpkg-dev \
+            python3-pip \
+            nodejs npm
+
+      # ── 3. Build skip flags ──────────────────────────────────────────────────
+      - name: Build skip flags
+        if: steps.filter.outputs.skip != 'true'
+        id: flags
+        run: |
+          FLAGS=""
+          SKIP="${{ github.event.inputs.skip_sections }}"
+          [[ "$SKIP" == *"apt"*      ]] && FLAGS="$FLAGS --skip-apt"
+          [[ "$SKIP" == *"pip"*      ]] && FLAGS="$FLAGS --skip-pip"
+          [[ "$SKIP" == *"npm"*      ]] && FLAGS="$FLAGS --skip-npm"
+          [[ "$SKIP" == *"snap"*     ]] && FLAGS="$FLAGS --skip-snap"
+          [[ "$SKIP" == *"binaries"* ]] && FLAGS="$FLAGS --skip-binaries"
+          echo "flags=$FLAGS" >> "$GITHUB_OUTPUT"
+          echo "Flags: '$FLAGS'"
+
+      # ── 4. Run download script ───────────────────────────────────────────────
+      - name: Download all packages
+        if: steps.filter.outputs.skip != 'true'
+        run: |
+          chmod +x download.sh
+          ./download.sh ${{ steps.flags.outputs.flags }}
+
+      # ── 5. Summary ───────────────────────────────────────────────────────────
+      - name: Summary
+        if: steps.filter.outputs.skip != 'true'
+        run: |
+          echo "Ubuntu ${{ matrix.ubuntu_name }} — package counts:"
+          echo "  APT  : $(find packages/apt      -name '*.deb'                    2>/dev/null | wc -l) .deb files"
+          echo "  PIP  : $(find packages/pip      -name '*.whl' -o -name '*.tar.gz' 2>/dev/null | wc -l) wheels"
+          echo "  NPM  : $(find packages/npm      -name '*.tgz'                    2>/dev/null | wc -l) tarballs"
+          echo "  SNAP : $(find packages/snap     -name '*.snap'                   2>/dev/null | wc -l) snaps"
+          echo "  BINS : $(find packages/binaries -type f                          2>/dev/null | wc -l) binaries"
+          du -sh packages/
+
+      # ── 6. Create tarball ────────────────────────────────────────────────────
+      - name: Create tarball
+        if: steps.filter.outputs.skip != 'true'
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+          SHORT="${{ matrix.ubuntu_short }}"
+          ARCHIVE="offline-toolkit-${SHORT}-${TAG}.tar.gz"
+
+          tar -czf "$ARCHIVE" \
+            config.sh \
+            download.sh \
+            install.sh \
+            README.md \
+            packages/ \
+            logs/
+
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+          echo "Created: $ARCHIVE ($(du -sh "$ARCHIVE" | cut -f1))"
+
+      # ── 7. Upload as workflow artifact (picked up by the release job) ────────
+      - name: Upload tarball artifact
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: toolkit-${{ matrix.ubuntu_short }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 1         # only needed until the release job runs
+
+  # ── Job 3: Collect both tarballs and publish a single GitHub Release ─────────
+  release:
+    name: Publish GitHub Release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    if: always() && needs.prepare.result == 'success'
+
+    permissions:
+      contents: write
+
+    steps:
+      # ── Download both tarballs produced by the matrix jobs ───────────────────
+      - name: Download toolkit artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: toolkit-*
+          merge-multiple: true
+          path: ./release-assets
+
+      - name: List release assets
+        run: |
+          echo "Assets ready to publish:"
+          ls -lh ./release-assets/
+
+      # ── Generate release notes ───────────────────────────────────────────────
+      - name: Generate release notes
+        run: |
+          TAG="${{ needs.prepare.outputs.tag }}"
+
+          case "${{ github.event_name }}" in
+            schedule)          TRIGGER="🕐 Weekly scheduled build" ;;
+            workflow_dispatch) TRIGGER="🖐 Manually triggered" ;;
+            *)                 TRIGGER="📝 Triggered by config.sh change" ;;
+          esac
+
+          cat > release-notes.md << EOF
+          # Offline Toolkit — $TAG
+
+          Two tarballs built in parallel on GitHub-hosted LTS runners.
+          Pick the one that matches your offline machine.
+
+          | Asset | Ubuntu | Codename | Runner status |
+          |-------|--------|----------|---------------|
+          | \`offline-toolkit-ubuntu22-${TAG}.tar.gz\` | 22.04 LTS | Jammy Jellyfish  | ✅ GA |
+          | \`offline-toolkit-ubuntu26-${TAG}.tar.gz\` | 26.04 LTS | Resolute Raccoon | 🔵 Preview |
+
+          ## How to use
+
+          \`\`\`bash
+          # Download the asset that matches your machine (example: Ubuntu 26.04)
+          wget https://github.com/${{ github.repository }}/releases/download/${TAG}/offline-toolkit-ubuntu26-${TAG}.tar.gz
+
+          # Extract
+          tar -xzf offline-toolkit-ubuntu26-${TAG}.tar.gz
+
+          # Transfer to your offline machine (USB, scp, rsync...)
+
+          # On the offline machine:
+          cd offline-toolkit
+          sudo ./install.sh
+          \`\`\`
+
+          ## Build info
+          - **Built:** $(date -u '+%Y-%m-%d %H:%M UTC')
+          - **Trigger:** $TRIGGER
+          - **Commit:** ${{ github.sha }}
+          EOF
+
+      # ── Publish the release with both tarballs ───────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: "Offline Toolkit ${{ needs.prepare.outputs.tag }}"
+          body_path: release-notes.md
+          files: ./release-assets/*.tar.gz
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
