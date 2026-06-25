@@ -25,7 +25,10 @@ on:
     branches:
       - main
     paths:
-      - "config.sh"               # rebuild only when packages change
+      - "config.sh"                              # package list changed
+      - "download.sh"                            # download logic changed
+      - "install.sh"                             # install logic changed
+      - ".github/workflows/build-toolkit.yml"   # workflow itself changed
 
   schedule:
     - cron: "0 2 * * 0"          # every Sunday at 02:00 UTC
