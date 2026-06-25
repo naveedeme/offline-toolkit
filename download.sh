@@ -72,7 +72,9 @@ preflight() {
     info "Architecture    : $ARCH"
     info "Output directory: $TOOLKIT_DIR"
 
-    if ! ping -c1 -W2 8.8.8.8 &>/dev/null; then
+    # ping is blocked on GitHub Actions runners — use curl instead
+    if ! curl -fsSL --max-time 5 https://archive.ubuntu.com &>/dev/null && \
+       ! curl -fsSL --max-time 5 https://google.com &>/dev/null; then
         error "No internet connection detected. This script requires an online machine."
         exit 1
     fi
