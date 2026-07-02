@@ -125,6 +125,16 @@ install_apt() {
 
     # Register the local folder as an apt source
     local sources_file="/etc/apt/sources.list.d/offline-toolkit.list"
+    local lists_dir
+    lists_dir=$(mktemp -d /tmp/offline-toolkit-apt-lists.XXXXXX)
+    mkdir -p "$lists_dir/partial"
+    local apt_opts=(
+        -o "Dir::Etc::sourcelist=$sources_file"
+        -o "Dir::Etc::sourceparts=-"
+        -o "Dir::State::Lists=$lists_dir"
+        -o "APT::Get::List-Cleanup=0"
+    )
+
     info "Registering local APT repository..."
     RUN bash -c "echo 'deb [trusted=yes] file://$DIR_APT ./' > $sources_file"
 
@@ -135,27 +145,26 @@ install_apt() {
         RUN bash -c "cd '$DIR_APT' && gzip -k9c Packages > Packages.gz"
     fi
 
-    RUN apt-get update -o Dir::Etc::sourcelist="$sources_file" \
-                       -o Dir::Etc::sourcelistd="" \
-                       -o APT::Get::List-Cleanup="0" -qq || true
+    RUN apt-get update "${apt_opts[@]}" -qq || true
 
     # Install all in one shot (apt resolves order)
     info "Installing all APT packages..."
     RUN env DEBIAN_FRONTEND=noninteractive \
         apt-get install -y \
         --no-install-recommends \
-        -o Dir::Etc::sourcelist="$sources_file" \
-        -o Dir::Etc::sourcelistd="" \
-        -o APT::Get::List-Cleanup="0" \
+        "${apt_opts[@]}" \
         "${APT_ALL[@]}" 2>&1 || {
-            warn "Some packages failed via apt — falling back to dpkg..."
-            RUN dpkg -i --force-depends "$DIR_APT"/*.deb 2>&1 || true
-            RUN apt-get install -f -y 2>&1 || true
+            error "APT could not resolve all packages from the local offline repo."
+            error "Not falling back to dpkg --force-depends because that can break dependencies."
+            error "Use './store.sh doctor PACKAGE' and 'sudo ./store.sh install --dry-run PACKAGE' to find the missing dependency."
+            RUN rm -f "$sources_file"
+            rm -rf "$lists_dir"
+            return 1
         }
 
     # Clean up the temporary apt source
     RUN rm -f "$sources_file"
-    RUN apt-get update -qq 2>/dev/null || true
+    rm -rf "$lists_dir"
 
     success "APT packages installed"
 }

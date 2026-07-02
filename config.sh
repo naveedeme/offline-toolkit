@@ -76,6 +76,43 @@ APT_ALL=(
     "${APT_PRODUCTIVITY[@]}"
 )
 
+# --- OFFLINE STORE GROUPS ----------------------------------------------------
+# These groups are used by store.sh for selected offline installs.
+# Keep package names here in APT_ALL too, so download.sh brings their .deb files
+# and dependency closure into packages/apt.
+APT_STORE_GROUPS=(
+    dev-core
+    python-dev
+    node-dev
+    docker
+    network
+    databases
+    productivity
+    full
+)
+
+declare -A APT_STORE_GROUP_DESCRIPTIONS=(
+    [dev-core]="Core shell, build, Git, editor, and archive tools"
+    [python-dev]="Python runtime, pip, virtualenv, headers, and common build pieces"
+    [node-dev]="Node.js, npm, and JavaScript tooling base packages"
+    [docker]="Docker engine, compose, and container runtime packages"
+    [network]="Network troubleshooting, SSH, firewall, packet, and scan tools"
+    [databases]="Database clients, PostgreSQL, SQLite, Redis tools, and JSON/XML helpers"
+    [productivity]="CLI productivity tools such as ripgrep, fzf, shellcheck, and ncdu"
+    [full]="Everything listed in APT_ALL"
+)
+
+declare -A APT_STORE_GROUP_PACKAGES=(
+    [dev-core]="curl wget git vim nano htop tree unzip zip tar gzip bzip2 xz-utils ca-certificates gnupg lsb-release software-properties-common apt-transport-https build-essential make cmake pkg-config openssh-client openssh-server rsync screen tmux"
+    [python-dev]="python3 python3-pip python3-venv python3-dev python3-setuptools python3-wheel build-essential pkg-config libssl-dev libffi-dev zlib1g-dev sqlite3 libsqlite3-dev"
+    [node-dev]="nodejs npm build-essential git curl"
+    [docker]="docker.io docker-compose containerd iptables"
+    [network]="ufw iptables tcpdump wireshark-common tshark netcat-openbsd socat fail2ban openssl net-tools iputils-ping nmap traceroute openssh-client openssh-server"
+    [databases]="jq xmlstarlet postgresql postgresql-client mysql-client redis-tools sqlite3 libsqlite3-dev"
+    [productivity]="git-lfs shellcheck cloc ripgrep fd-find bat fzf ncdu moreutils parallel"
+)
+APT_STORE_GROUP_PACKAGES[full]="${APT_ALL[*]}"
+
 # --- PIP PACKAGES (Python) ---------------------------------------------------
 PIP_PACKAGES=(
     # CLI & utilities
@@ -134,6 +171,8 @@ DIR_PIP="$TOOLKIT_DIR/packages/pip"
 DIR_NPM="$TOOLKIT_DIR/packages/npm"
 DIR_SNAP="$TOOLKIT_DIR/packages/snap"
 DIR_BINARIES="$TOOLKIT_DIR/packages/binaries"
+DIR_CATALOG="$TOOLKIT_DIR/catalog"
+DIR_APT_CLOSURES="$DIR_CATALOG/apt/closures"
 DIR_LOGS="$TOOLKIT_DIR/logs"
 
 # --- SETTINGS ----------------------------------------------------------------

@@ -28,6 +28,7 @@ on:
       - "config.sh"                              # package list changed
       - "download.sh"                            # download logic changed
       - "install.sh"                             # install logic changed
+      - "store.sh"                               # offline store logic changed
       - ".github/workflows/build-toolkit.yml"   # workflow itself changed
 
   schedule:
@@ -170,7 +171,9 @@ jobs:
             config.sh \
             download.sh \
             install.sh \
+            store.sh \
             README.md \
+            catalog/ \
             packages/ \
             logs/
 
@@ -245,7 +248,9 @@ jobs:
 
           # On the offline machine:
           cd offline-toolkit
-          sudo ./install.sh
+          ./store.sh search docker
+          sudo ./store.sh install --dry-run docker.io
+          sudo ./store.sh install docker.io
           \`\`\`
 
           ## Build info

@@ -90,14 +90,95 @@ preflight() {
 }
 
 # ── APT packages ──────────────────────────────────────────────────────────────
+apt_dependency_closure() {
+    local pkg="$1"
+
+    if command -v apt-rdepends &>/dev/null; then
+        apt-rdepends "$pkg" 2>/dev/null \
+            | grep -v '^ ' \
+            | grep -v '^debconf-2' \
+            | sort -u
+    else
+        apt-cache depends --recurse \
+            --no-recommends \
+            --no-suggests \
+            --no-conflicts \
+            --no-breaks \
+            --no-replaces \
+            --no-enhances \
+            "$pkg" 2>/dev/null \
+            | awk '/^[[:alnum:]][[:alnum:].+:-]*$/ { print $1 }' \
+            | sort -u
+    fi
+}
+
+write_apt_version_catalogs() {
+    mkdir -p "$DIR_CATALOG/apt"
+
+    local package_index="$DIR_APT/Packages"
+    if [ ! -f "$package_index" ]; then
+        warn "APT package index missing; skipping version catalog"
+        return
+    fi
+
+    awk '
+        BEGIN {
+            RS="";
+            FS="\n";
+            OFS="\t";
+            print "package", "version", "architecture", "filename", "description";
+        }
+        {
+            package=""; version=""; arch=""; filename=""; description="";
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^Package: /) package=substr($i, 10);
+                else if ($i ~ /^Version: /) version=substr($i, 10);
+                else if ($i ~ /^Architecture: /) arch=substr($i, 15);
+                else if ($i ~ /^Filename: /) filename=substr($i, 11);
+                else if ($i ~ /^Description: /) description=substr($i, 14);
+            }
+            if (package != "") print package, version, arch, filename, description;
+        }
+    ' "$package_index" > "$DIR_CATALOG/apt/packages.tsv"
+
+    {
+        printf 'package\tversion\tarchitecture\tstatus\n'
+        local pkg
+        for pkg in "${APT_ALL[@]}"; do
+            awk -v pkg="$pkg" '
+                BEGIN { RS=""; FS="\n"; found=0 }
+                {
+                    package=""; version=""; arch="";
+                    for (i = 1; i <= NF; i++) {
+                        if ($i ~ /^Package: /) package=substr($i, 10);
+                        else if ($i ~ /^Version: /) version=substr($i, 10);
+                        else if ($i ~ /^Architecture: /) arch=substr($i, 15);
+                    }
+                    if (package == pkg && !found) {
+                        print package "\t" version "\t" arch "\tpresent";
+                        found=1;
+                    }
+                }
+                END {
+                    if (!found) print pkg "\t\t\tmissing";
+                }
+            ' "$package_index"
+        done
+    } > "$DIR_CATALOG/apt/requested.tsv"
+
+    success "APT version catalog written to: $DIR_CATALOG/apt/packages.tsv"
+    success "Requested package versions written to: $DIR_CATALOG/apt/requested.tsv"
+}
+
 download_apt() {
     header "Downloading APT Packages"
-    mkdir -p "$DIR_APT"
+    mkdir -p "$DIR_APT" "$DIR_CATALOG/apt" "$DIR_APT_CLOSURES"
 
     # Install apt-rdepends for deep dependency resolution
     sudo apt-get install -y -qq apt-rdepends 2>/dev/null || true
 
     local failed=()
+    local missing=()
     local total=${#APT_ALL[@]}
     local count=0
 
@@ -109,15 +190,20 @@ download_apt() {
         if ! apt-cache show "$pkg" &>/dev/null; then
             warn "Not found — skipping $pkg"
             failed+=("$pkg")
+            missing+=("$pkg")
             continue
         fi
 
-        # Download package + its dependencies into DIR_APT
-        (cd "$DIR_APT" && apt-get download \
-            $(apt-rdepends "$pkg" 2>/dev/null \
-                | grep -v '^ ' \
-                | grep -v '^debconf-2' \
-                | sort -u) 2>/dev/null) || \
+        local closure_file="$DIR_APT_CLOSURES/$pkg.txt"
+        apt_dependency_closure "$pkg" > "$closure_file"
+
+        if [ ! -s "$closure_file" ]; then
+            printf '%s\n' "$pkg" > "$closure_file"
+            warn "Dependency closure was empty — using package only for $pkg"
+        fi
+
+        # Download package + its per-package dependency closure into DIR_APT.
+        (cd "$DIR_APT" && xargs -r apt-get download < "$closure_file" 2>/dev/null) || \
         (cd "$DIR_APT" && apt-get download "$pkg" 2>/dev/null) || {
             warn "Failed to download $pkg"
             failed+=("$pkg")
@@ -131,14 +217,26 @@ download_apt() {
     info "Building APT package index..."
     (cd "$DIR_APT" && dpkg-scanpackages . 2>/dev/null | gzip -9c > Packages.gz)
     (cd "$DIR_APT" && dpkg-scanpackages . 2>/dev/null > Packages)
+    write_apt_version_catalogs
 
     success "APT packages saved to: $DIR_APT"
     success "Total .deb files: $(find "$DIR_APT" -name '*.deb' | wc -l)"
+    success "Dependency closures saved to: $DIR_APT_CLOSURES"
 
     if [ ${#failed[@]} -gt 0 ]; then
         warn "The following packages were not found and were skipped:"
         printf '  - %s\n' "${failed[@]}"
     fi
+
+    {
+        printf '%s\n' "# Missing APT packages"
+        printf '%s\n' "${missing[@]:-}"
+    } > "$DIR_CATALOG/apt/missing.txt"
+
+    {
+        printf '%s\n' "# Failed APT package downloads"
+        printf '%s\n' "${failed[@]:-}"
+    } > "$DIR_CATALOG/apt/failed-downloads.txt"
 }
 
 # ── PIP packages ──────────────────────────────────────────────────────────────
@@ -234,6 +332,12 @@ write_manifest() {
         echo ""
         echo "## APT Packages (${#APT_ALL[@]})"
         printf '  %s\n' "${APT_ALL[@]}"
+        echo ""
+        echo "## APT Dependency Closures"
+        echo "  Directory: $DIR_APT_CLOSURES"
+        echo "  Files    : $(find "$DIR_APT_CLOSURES" -name '*.txt' 2>/dev/null | wc -l)"
+        echo "  Versions : $DIR_CATALOG/apt/packages.tsv"
+        echo "  Requested: $DIR_CATALOG/apt/requested.tsv"
         echo ""
         echo "## Python Packages (${#PIP_PACKAGES[@]})"
         printf '  %s\n' "${PIP_PACKAGES[@]}"
